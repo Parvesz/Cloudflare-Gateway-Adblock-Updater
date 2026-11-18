@@ -29,29 +29,39 @@ jobs:
           PREFIX: ${{ inputs.list_prefix }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          python - <<'EOF'
-          import os, requests
+          python -u - <<'EOF'
+          import os, time, requests
           acc = os.environ["CLOUDFLARE_ACCOUNT_ID"]
-          h = {"Authorization": f"Bearer {os.environ['CLOUDFLARE_API_TOKEN']}"}
+          h = {"Authorization": "Bearer " + os.environ["CLOUDFLARE_API_TOKEN"]}
           base = f"https://api.cloudflare.com/client/v4/accounts/{acc}/gateway/lists"
           prefix = os.environ["PREFIX"]
           dry = os.environ["DRY_RUN"] == "true"
 
-          lists, page = [], 1
+          seen, page = {}, 1
           while True:
-              r = requests.get(base, headers=h, params={"page": page, "per_page": 100}).json()
+              r = requests.get(base, headers=h, params={"page": page}, timeout=60).json()
               items = r.get("result") or []
-              lists += items
-              if len(items) < 100:
+              new = [l for l in items if l["id"] not in seen]
+              for l in new:
+                  seen[l["id"]] = l
+              if not new:
                   break
               page += 1
+              if page > 20:
+                  break
 
+          lists = list(seen.values())
           targets = [l for l in lists if l["name"].startswith(prefix)]
           print(f"Total lists: {len(lists)} | Matching '{prefix}': {len(targets)}")
+
           for l in targets:
               if dry:
                   print("WOULD DELETE:", l["name"])
-              else:
-                  r = requests.delete(f"{base}/{l['id']}", headers=h)
-                  print(("Deleted: " if r.ok else f"FAILED ({r.status_code}): ") + l["name"])
+                  continue
+              for attempt in range(3):
+                  r = requests.delete(f"{base}/{l['id']}", headers=h, timeout=60)
+                  if r.status_code != 429:
+                      break
+                  time.sleep(5)
+              print(("Deleted: " if r.ok else f"FAILED ({r.status_code}): ") + l["name"])
           EOF
